@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
@@ -8,8 +9,18 @@ from sse_starlette.sse import EventSourceResponse
 from .llm_provider import CHAT_SYSTEM_MESSAGE, CompletionMessage, create_chat_completion
 from .request_models import CreateChatIn
 from .response_models import SsePayload
+from .store import ChatStore
 
-app = FastAPI()
+
+# Create a store instance at startup and close it at shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.store = ChatStore()
+    yield
+    await app.state.store.close()
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Configure CORS
 app.add_middleware(
@@ -28,9 +39,34 @@ def read_health():
 
 @app.post("/chat")
 async def create_chat(create_chat_in: CreateChatIn) -> StreamingResponse:
-    completion_message = CompletionMessage(role="user", content=create_chat_in.message)
-    response = create_chat_completion([CHAT_SYSTEM_MESSAGE, completion_message])
-    sse = async_generator_as_sse(response)
+    # Get previous messages for this session
+    previous_messages = await app.state.store.get_messages(create_chat_in.session_id)
+
+    # Create new user message
+    user_message = CompletionMessage(role="user", content=create_chat_in.message)
+
+    # Combine system message, previous messages, and new message
+    messages = [CHAT_SYSTEM_MESSAGE] + previous_messages + [user_message]
+
+    # Get response from LLM
+    response = create_chat_completion(messages)
+
+    # Store the user message
+    await app.state.store.add_message(create_chat_in.session_id, user_message)
+
+    # Create SSE response
+    async def wrapped_response():
+        accum = ""
+        async for chunk in response:
+            accum += chunk
+            yield chunk
+        # After getting full response, store the assistant's message
+        await app.state.store.add_message(
+            create_chat_in.session_id,
+            CompletionMessage(role="assistant", content=accum),
+        )
+
+    sse = async_generator_as_sse(wrapped_response())
     return EventSourceResponse(sse)
 
 
