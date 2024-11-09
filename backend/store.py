@@ -41,13 +41,18 @@ class ChatStore:
             "content": content,
             "created_at": datetime.utcnow().isoformat(),
         }
-        await self.redis.set(context_id, json.dumps(context_data))
+        await self.redis.json().set(context_id, "$", context_data)
         return context_id
 
     async def search_contexts(self, query: str) -> List[dict]:
         """Search through stored contexts"""
-        results = await self.redis.ft("context-idx").search(query)
-        return [doc.json for doc in results.docs]
+        formatted_query = f"(@title:{query}) | (@content:{query})"
+        results = await self.redis.ft("context-idx").search(formatted_query)
+        contexts = []
+        for doc in results.docs:
+            context_data = json.loads(doc.json)
+            contexts.append(context_data)
+        return contexts
 
     async def add_message(self, session_id: str, message: CompletionMessage) -> None:
         """Add a message to the chat history."""

@@ -1,9 +1,14 @@
-from typing import Literal
+import json
+from typing import TYPE_CHECKING, Literal
 
 import openai
 from pydantic import BaseModel
 
 from .settings import settings
+from .tools import TOOLS, TOOLS_FNS
+
+if TYPE_CHECKING:
+    from .store import ChatStore
 
 _client = openai.AsyncOpenAI(
     api_key=settings.OPENROUTER_API_KEY,
@@ -12,8 +17,12 @@ _client = openai.AsyncOpenAI(
 
 
 class CompletionMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
+    role: Literal["system", "user", "assistant", "function"]
     content: str
+
+
+class FunctionResultCompletionMessage(CompletionMessage):
+    name: str
 
 
 CHAT_SYSTEM_MESSAGE = CompletionMessage(
@@ -22,6 +31,9 @@ CHAT_SYSTEM_MESSAGE = CompletionMessage(
 You are an AI representative of Eigen, an AI-first company focused on enterprise solutions. Your role is to engage visitors on eigen.net in a direct, pragmatic, and thoughtful manner.
 
 Core Behaviors:
+- Act as a friendly sales agent promoting Eigen's capabilities and case studies without being overly pushy.
+- For example, if a visitor states their sector, you should respond with a relevant case study so they can see how Eigen has helped others in their industry.
+- If a visitor message is too vague, ask follow-up questions to better understand their needs.
 - Maintain a tone that is intelligent and no-nonsense, avoiding consultant-speak or overly formal language
 - Engage in discovery by asking about visitors' names, companies, and needs when appropriate
 - Tailor responses based on the user's context and industry
@@ -45,11 +57,85 @@ If you're unsure about any information or if a question requires specific expert
 )
 
 
-async def create_chat_completion(messages: list[CompletionMessage]):
+async def create_chat_completion(
+    messages: list[CompletionMessage], store: "ChatStore", depth: int = 0
+):
+    if depth > 3:
+        yield "I'm sorry, I'm having trouble understanding your request. Please try again."
+        return
+
     response = await _client.chat.completions.create(
         model=settings.LLM_MODEL_NAME,
         messages=messages,
         stream=True,
+        tools=TOOLS,
+        tool_choice="auto",
     )
+    # Define variables to hold the streaming content and function call
+    streaming_content = ""
+    function_call = {"name": "", "arguments": ""}
+
+    # Loop through the response chunks
     async for chunk in response:
-        yield chunk.choices[0].delta.content
+        # Handle errors
+        if not chunk.choices:
+            messages.append(
+                CompletionMessage(
+                    role="assistant",
+                    content="Sorry, there was an error. Please try again.",
+                )
+            )
+            yield "Sorry, there was an error. Please try again."
+            break
+
+        # Get the first choice
+        delta = chunk.choices[0].delta
+
+        # If there's a function call, save it for later
+        if delta.tool_calls:
+            for tool_call in delta.tool_calls:
+                if tool_call.function.name:
+                    function_call["name"] += tool_call.function.name
+                if tool_call.function.arguments:
+                    function_call["arguments"] += tool_call.function.arguments
+
+        # If it's content, add it to the streaming content and yield it
+        elif delta.content:
+            streaming_content += delta.content
+            yield delta.content
+
+        # Check finish reason
+        if chunk.choices[0].finish_reason == "stop":
+            messages.append(
+                CompletionMessage(role="assistant", content=streaming_content)
+            )
+
+        elif chunk.choices[0].finish_reason == "tool_calls":
+            function_output = await call_function(
+                function_call["name"], function_call["arguments"], store
+            )
+            messages.append(
+                FunctionResultCompletionMessage(
+                    role="function",
+                    content=function_output,
+                    name=function_call["name"],
+                )
+            )
+            async for chunk in create_chat_completion(messages, store, depth + 1):
+                yield chunk
+
+
+async def call_function(
+    function_name: str, function_arguments: str, store: "ChatStore"
+) -> str:
+    """Calls a function and returns the result."""
+
+    # Ensure the function is defined
+    if function_name not in TOOLS_FNS:
+        return "Function not defined."
+
+    # Convert the function arguments from a string to a dict
+    function_arguments_dict = json.loads(function_arguments)
+
+    # Call the function and return the result
+    return await TOOLS_FNS[function_name].run(**function_arguments_dict, store=store)

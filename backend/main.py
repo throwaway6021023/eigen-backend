@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -22,6 +23,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+logger = logging.getLogger(__name__)
 
 # Configure CORS
 app.add_middleware(
@@ -50,7 +52,7 @@ async def create_chat(create_chat_in: CreateChatIn) -> StreamingResponse:
     messages = [CHAT_SYSTEM_MESSAGE] + previous_messages + [user_message]
 
     # Get response from LLM
-    response = create_chat_completion(messages)
+    response = create_chat_completion(messages, app.state.store)
 
     # Store the user message
     await app.state.store.add_message(create_chat_in.session_id, user_message)
@@ -88,6 +90,7 @@ async def async_generator_as_sse(
         async for chunk in generator:
             yield SsePayload(data=chunk, event="data").model_dump_json()
     except Exception as e:
+        logger.exception("Error in async generator")
         yield SsePayload(data=str(e), event="error").model_dump_json()
     finally:
         yield SsePayload(data="", event="end").model_dump_json()
