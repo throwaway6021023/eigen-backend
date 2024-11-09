@@ -14,7 +14,17 @@ It's a simple FastAPI application.
 $ poetry install
 ```
 
+Then, copy the `.env-example` file to `.env` and set the `OPENROUTER_API_KEY` environment variable.
+
 ## Running the application
+
+First, run the following command to start the database:
+
+```bash
+$ docker compose up
+```
+
+Then, run the following command to start the FastAPI server:
 
 ```bash
 # For dev mode
