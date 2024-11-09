@@ -61,7 +61,8 @@ async def create_chat(create_chat_in: CreateChatIn) -> StreamingResponse:
     async def wrapped_response():
         accum = ""
         async for chunk in response:
-            accum += chunk
+            if chunk["type"] == "text":
+                accum += chunk["text"]
             yield chunk
         # After getting full response, store the assistant's message
         await app.state.store.add_message(
@@ -88,7 +89,12 @@ async def async_generator_as_sse(
 ) -> AsyncGenerator[SsePayload, None]:
     try:
         async for chunk in generator:
-            yield SsePayload(data=chunk, event="data").model_dump_json()
+            if chunk["type"] == "text":
+                yield SsePayload(data=chunk["text"], event="data").model_dump_json()
+            elif chunk["type"] == "component":
+                yield SsePayload(
+                    data=chunk["component"], event="component"
+                ).model_dump_json()
     except Exception as e:
         logger.exception("Error in async generator")
         yield SsePayload(data=str(e), event="error").model_dump_json()

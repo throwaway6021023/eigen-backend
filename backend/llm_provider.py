@@ -5,7 +5,7 @@ import openai
 from pydantic import BaseModel
 
 from .settings import settings
-from .tools import TOOLS, TOOLS_FNS
+from .tools import COMPONENT_FNS, TOOL_FNS, TOOLS
 
 if TYPE_CHECKING:
     from .store import ChatStore
@@ -38,6 +38,7 @@ Core Behaviors:
 - Engage in discovery by asking about visitors' names, companies, and needs when appropriate
 - Tailor responses based on the user's context and industry
 - Be direct and honest - if you don't have specific information, acknowledge it and offer to connect the user with a partner
+- If a user asks to contact Eigen, render a contact form right away instead of asking them for more information.
 
 Key Responsibilities:
 - Help visitors understand Eigen's capabilities and offerings
@@ -61,7 +62,10 @@ async def create_chat_completion(
     messages: list[CompletionMessage], store: "ChatStore", depth: int = 0
 ):
     if depth > 3:
-        yield "I'm sorry, I'm having trouble understanding your request. Please try again."
+        yield {
+            "type": "text",
+            "text": "I'm sorry, I'm having trouble understanding your request. Please try again.",
+        }
         return
 
     response = await _client.chat.completions.create(
@@ -85,7 +89,10 @@ async def create_chat_completion(
                     content="Sorry, there was an error. Please try again.",
                 )
             )
-            yield "Sorry, there was an error. Please try again."
+            yield {
+                "type": "text",
+                "text": "Sorry, there was an error. Please try again.",
+            }
             break
 
         # Get the first choice
@@ -102,7 +109,10 @@ async def create_chat_completion(
         # If it's content, add it to the streaming content and yield it
         elif delta.content:
             streaming_content += delta.content
-            yield delta.content
+            yield {
+                "type": "text",
+                "text": delta.content,
+            }
 
         # Check finish reason
         if chunk.choices[0].finish_reason == "stop":
@@ -111,18 +121,27 @@ async def create_chat_completion(
             )
 
         elif chunk.choices[0].finish_reason == "tool_calls":
-            function_output = await call_function(
-                function_call["name"], function_call["arguments"], store
-            )
-            messages.append(
-                FunctionResultCompletionMessage(
-                    role="function",
-                    content=function_output,
-                    name=function_call["name"],
+            if function_call["name"] in COMPONENT_FNS:
+                component_output = COMPONENT_FNS[function_call["name"]].run(
+                    **json.loads(function_call["arguments"])
                 )
-            )
-            async for chunk in create_chat_completion(messages, store, depth + 1):
-                yield chunk
+                yield {
+                    "type": "component",
+                    "component": component_output,
+                }
+            else:
+                function_output = await call_function(
+                    function_call["name"], function_call["arguments"], store
+                )
+                messages.append(
+                    FunctionResultCompletionMessage(
+                        role="function",
+                        content=function_output,
+                        name=function_call["name"],
+                    )
+                )
+                async for chunk in create_chat_completion(messages, store, depth + 1):
+                    yield chunk
 
 
 async def call_function(
@@ -131,11 +150,11 @@ async def call_function(
     """Calls a function and returns the result."""
 
     # Ensure the function is defined
-    if function_name not in TOOLS_FNS:
+    if function_name not in TOOL_FNS:
         return "Function not defined."
 
     # Convert the function arguments from a string to a dict
     function_arguments_dict = json.loads(function_arguments)
 
     # Call the function and return the result
-    return await TOOLS_FNS[function_name].run(**function_arguments_dict, store=store)
+    return await TOOL_FNS[function_name].run(**function_arguments_dict, store=store)

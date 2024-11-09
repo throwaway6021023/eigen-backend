@@ -5,4 +5,4 @@ from pydantic import BaseModel
 
 class SsePayload(BaseModel):
     data: str
-    event: Literal["data", "end", "error"]
+    event: Literal["data", "end", "error", "component"]
