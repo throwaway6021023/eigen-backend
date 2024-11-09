@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
 from .llm_provider import CHAT_SYSTEM_MESSAGE, CompletionMessage, create_chat_completion
-from .request_models import CreateChatIn
+from .request_models import CreateChatIn, CreateContextIn
 from .response_models import SsePayload
 from .store import ChatStore
 
@@ -16,6 +16,7 @@ from .store import ChatStore
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.store = ChatStore()
+    await app.state.store.create_search_index()
     yield
     await app.state.store.close()
 
@@ -68,6 +69,16 @@ async def create_chat(create_chat_in: CreateChatIn) -> StreamingResponse:
 
     sse = async_generator_as_sse(wrapped_response())
     return EventSourceResponse(sse)
+
+
+@app.post("/context")
+async def create_context(create_context_in: CreateContextIn):
+    """Store new context data for future reference"""
+    context_id = await app.state.store.add_context(
+        title=create_context_in.title, content=create_context_in.content
+    )
+
+    return {"status": "success", "context_id": context_id}
 
 
 async def async_generator_as_sse(

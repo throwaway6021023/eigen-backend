@@ -1,7 +1,11 @@
 import json
+import uuid
+from datetime import datetime
 from typing import List
 
 import redis.asyncio as redis
+from redis.commands.search.field import TextField
+from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 
 from .llm_provider import CompletionMessage
 from .settings import settings
@@ -10,6 +14,40 @@ from .settings import settings
 class ChatStore:
     def __init__(self):
         self.redis = redis.from_url(settings.REDIS_URL)
+
+    async def create_search_index(self):
+        # Create a search index for contexts if it doesn't exist
+        try:
+            schema = (
+                TextField("$.title", as_name="title"),
+                TextField("$.content", as_name="content"),
+            )
+
+            await self.redis.ft("context-idx").create_index(
+                schema,
+                definition=IndexDefinition(
+                    prefix=["context:"], index_type=IndexType.JSON
+                ),
+            )
+        except Exception:
+            # Index might already exist
+            pass
+
+    async def add_context(self, title: str, content: str) -> str:
+        """Store a new context entry"""
+        context_id = f"context:{uuid.uuid4()}"
+        context_data = {
+            "title": title,
+            "content": content,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        await self.redis.set(context_id, json.dumps(context_data))
+        return context_id
+
+    async def search_contexts(self, query: str) -> List[dict]:
+        """Search through stored contexts"""
+        results = await self.redis.ft("context-idx").search(query)
+        return [doc.json for doc in results.docs]
 
     async def add_message(self, session_id: str, message: CompletionMessage) -> None:
         """Add a message to the chat history."""
